@@ -8,6 +8,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 #ifdef _WIN32
 
@@ -107,10 +108,21 @@ int lab_network_handle_push(const uint8_t *payload, uint32_t len)
 
     memcpy(&sealed, payload, sizeof(sealed));
 
-    if (lab_policy_unseal(&policy, &sealed,
-                          st->hmac_key,
-                          sizeof(st->hmac_key)) != 0)
-        return -1;
+{
+        int rc = lab_policy_unseal(&policy, &sealed,
+                               st->hmac_key,
+                               sizeof(st->hmac_key));
+
+        if (rc != 0)
+        {
+            lab_audit_log("POLICY_REJECT",
+                        "unseal failed rc=%d len=%u seq=%llu",
+                          rc,
+                          len,
+                          (unsigned long long)sealed.seq);
+            return -1;
+        }
+    }
 
     if (st->policy_loaded && sealed.seq <= st->policy_seq)
     {
@@ -121,11 +133,37 @@ int lab_network_handle_push(const uint8_t *payload, uint32_t len)
         return -1;
     }
 
-    if (lab_policy_save_file(&sealed, lab_policy_path()) != 0)
-        return -1;
+    if (lab_policy_save_file(&sealed, lab_policy_path()) != 0) { lab_audit_log("POLICY_REJECT", "save_file failed"); return -1; }
 
-    if (lab_state_apply_policy(&policy) != 0)
-        return -1;
+    if (lab_state_apply_policy(&policy) != 0) { lab_audit_log("POLICY_REJECT", "apply_policy failed"); return -1; }
+
+    return 0;
+}
+
+
+static int recv_all(lab_socket_t sock, uint8_t *buf, size_t len)
+{
+    size_t total = 0;
+
+    while (total < len)
+    {
+#ifdef _WIN32
+        int n = recv(sock,
+                     (char *)buf + total,
+                     (int)(len - total),
+                     0);
+#else
+        ssize_t n = recv(sock,
+                         buf + total,
+                         len - total,
+                         0);
+#endif
+
+        if (n <= 0)
+            return -1;
+
+        total += (size_t)n;
+    }
 
     return 0;
 }
@@ -133,42 +171,98 @@ int lab_network_handle_push(const uint8_t *payload, uint32_t len)
 
 static void handle_client(lab_socket_t client)
 {
-    uint8_t buf[LAB_MAX_PAYLOAD + 256];
-
-#ifdef _WIN32
-    int n = recv(client, (char *)buf, sizeof(buf), 0);
-#else
-    ssize_t n = recv(client, buf, sizeof(buf), 0);
-#endif
-
     lab_msg_header_t hdr;
-    const uint8_t *payload;
+    uint8_t *payload = NULL;
     lab_agent_state_t *st = lab_state();
 
-    if (n < (int)sizeof(lab_msg_header_t))
+    /*
+     * TCP is a byte stream.
+     * First receive exactly the fixed-size header.
+     */
+    if (recv_all(client,
+                 (uint8_t *)&hdr,
+                 sizeof(hdr)) != 0)
+    {
+        lab_audit_log("NET_REJECT", "failed to receive header");
         return;
+    }
 
-    if (lab_msg_unpack(buf, (size_t)n, &hdr, &payload) != 0)
+    /*
+     * Validate the header before allocating/receiving payload.
+     */
+    if (hdr.magic != LAB_MAGIC ||
+        hdr.version != LAB_PROTOCOL_VER ||
+        hdr.payload_len > LAB_MAX_PAYLOAD)
+    {
+        lab_audit_log("NET_REJECT",
+                      "invalid header magic=%08x version=%u payload_len=%u",
+                      hdr.magic,
+                      hdr.version,
+                      hdr.payload_len);
         return;
+    }
 
-    if (lab_header_verify(&hdr, payload,
+    /*
+     * Receive exactly the payload declared by the header.
+     */
+    if (hdr.payload_len > 0)
+    {
+        payload = malloc(hdr.payload_len);
+
+        if (!payload)
+        {
+            lab_audit_log("NET_REJECT",
+                          "payload allocation failed len=%u",
+                          hdr.payload_len);
+            return;
+        }
+
+        if (recv_all(client,
+                     payload,
+                     hdr.payload_len) != 0)
+        {
+            lab_audit_log("NET_REJECT",
+                          "failed to receive payload len=%u",
+                          hdr.payload_len);
+            free(payload);
+            return;
+        }
+    }
+
+    /*
+     * Verify the HMAC over the complete message.
+     */
+    if (lab_header_verify(&hdr,
+                          payload,
                           st->hmac_key,
                           sizeof(st->hmac_key)) != 0)
     {
         lab_audit_log("NET_REJECT",
                       "HMAC invalido seq=%llu",
                       (unsigned long long)hdr.seq);
+
+        free(payload);
         return;
     }
 
     switch (hdr.type)
     {
     case LAB_MSG_PUSH_POLICY:
-        if (lab_network_handle_push(payload, hdr.payload_len) == 0)
-            send_reply(client, LAB_MSG_ACK, NULL, 0);
+        if (lab_network_handle_push(payload,
+                                    hdr.payload_len) == 0)
+        {
+            send_reply(client,
+                       LAB_MSG_ACK,
+                       NULL,
+                       0);
+        }
         else
-            send_reply(client, LAB_MSG_ERROR,
-                       (uint8_t *)"POLICY", 6);
+        {
+            send_reply(client,
+                       LAB_MSG_ERROR,
+                       (uint8_t *)"POLICY",
+                       6);
+        }
         break;
 
     case LAB_MSG_SWITCH_PROFILE:
@@ -186,12 +280,19 @@ static void handle_client(lab_socket_t client)
             lab_state_switch_profile(profile);
         }
 
-        send_reply(client, LAB_MSG_ACK, NULL, 0);
+        send_reply(client,
+                   LAB_MSG_ACK,
+                   NULL,
+                   0);
         break;
 
     case LAB_MSG_TRIGGER_RESET:
         lab_reset_run(lab_state_active_profile());
-        send_reply(client, LAB_MSG_ACK, NULL, 0);
+
+        send_reply(client,
+                   LAB_MSG_ACK,
+                   NULL,
+                   0);
         break;
 
     case LAB_MSG_GET_STATUS:
@@ -217,7 +318,8 @@ static void handle_client(lab_socket_t client)
 
         status.status = st->agent_status;
         status.last_policy_seq = st->policy_seq;
-        status.uptime_sec = lab_monotonic_sec() - st->start_time;
+        status.uptime_sec =
+            lab_monotonic_sec() - st->start_time;
 
         send_reply(client,
                    LAB_MSG_STATUS_REPLY,
@@ -233,6 +335,8 @@ static void handle_client(lab_socket_t client)
                    7);
         break;
     }
+
+    free(payload);
 }
 
 
@@ -430,22 +534,54 @@ int lab_network_start(void)
     if (g_tcp_sock == LAB_INVALID_SOCKET ||
         g_udp_sock == LAB_INVALID_SOCKET)
     {
+        fprintf(stderr, "[network] Failed to create TCP or UDP socket\n");
         lab_network_stop();
         return -1;
     }
 
     {
         int yes = 1;
+        if (setsockopt(g_tcp_sock,
+                       SOL_SOCKET,
+                       SO_REUSEADDR,
+#ifdef _WIN32
+                       (const char *)&yes,
+#else
+                       &yes,
+#endif
+                       sizeof(yes)) != 0)
+        {
+            fprintf(stderr, "[network] Warning: failed to set SO_REUSEADDR on TCP socket\n");
+        }
+    }
 
-        setsockopt(g_udp_sock,
+    {
+        int yes = 1;
+        if (setsockopt(g_udp_sock,
+                       SOL_SOCKET,
+                       SO_REUSEADDR,
+#ifdef _WIN32
+                       (const char *)&yes,
+#else
+                       &yes,
+#endif
+                       sizeof(yes)) != 0)
+        {
+            fprintf(stderr, "[network] Warning: failed to set SO_REUSEADDR on UDP socket\n");
+        }
+
+        if (setsockopt(g_udp_sock,
                    SOL_SOCKET,
                    SO_BROADCAST,
 #ifdef _WIN32
-                   (char *)&yes,
+                   (const char *)&yes,
 #else
                    &yes,
 #endif
-                   sizeof(yes));
+                   sizeof(yes)) != 0)
+        {
+            fprintf(stderr, "[network] Warning: failed to set SO_BROADCAST on UDP socket\n");
+        }
     }
 
     memset(&addr, 0, sizeof(addr));

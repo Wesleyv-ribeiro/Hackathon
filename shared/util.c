@@ -33,9 +33,9 @@ static void init_paths(void)
 #endif
 
     snprintf(g_data_dir, sizeof(g_data_dir), "%s%cdata", base, LAB_PATH_SEP);
-    snprintf(g_baseline_dir, sizeof(g_baseline_dir), "%s\\baseline", base);
-    snprintf(g_log_path, sizeof(g_log_path), "%s\\audit.log", base);
-    snprintf(g_policy_path, sizeof(g_policy_path), "%s\\policy.sealed", base);
+    snprintf(g_baseline_dir, sizeof(g_baseline_dir), "%s%cbaseline", base, LAB_PATH_SEP);
+    snprintf(g_log_path, sizeof(g_log_path), "%s%caudit.log", base, LAB_PATH_SEP);
+    snprintf(g_policy_path, sizeof(g_policy_path), "%s%cpolicy.sealed", base, LAB_PATH_SEP);
     g_paths_init = 1;
 }
 

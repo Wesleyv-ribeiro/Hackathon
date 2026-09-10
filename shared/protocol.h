@@ -13,7 +13,7 @@
 
 #define LAB_HMAC_SIZE       32
 #define LAB_NONCE_SIZE      16
-#define LAB_MAX_PAYLOAD     65536
+#define LAB_MAX_PAYLOAD     (65536 + 256)
 #define LAB_MAX_HOSTNAME    128
 #define LAB_MAX_PROFILE_ID  64
 #define LAB_MAX_APPS        32

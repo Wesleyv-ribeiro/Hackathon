@@ -242,7 +242,7 @@ int lab_policy_seal(lab_sealed_policy_t *sealed, const lab_policy_t *policy,
     sealed->seq = policy->seq;
 
     if (lab_policy_to_json(policy, sealed->json_payload,
-                           sizeof(sealed->json_payload)) != 0)
+                           LAB_MAX_PAYLOAD) != 0)
         return -1;
 
     if (lab_sha256((const uint8_t *)sealed->json_payload,
@@ -276,7 +276,7 @@ int lab_policy_unseal(lab_policy_t *out, const lab_sealed_policy_t *sealed,
     if (!lab_secure_compare(sig, sealed->signature, LAB_SHA256_SIZE))
         return -1;
 
-    if (sealed->valid_until < lab_now_unix())
+    if (sealed->valid_until != 0 && sealed->valid_until < lab_now_unix())
         return -2;
 
     return lab_policy_from_json(out, sealed->json_payload);
