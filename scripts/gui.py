@@ -20,7 +20,7 @@ AGENT_PATTERN = re.compile(r"\[([^]]+)\]\s+(.+?)\s+@\s+([^:]+):(\d+)")
 class LabConsole(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("LabOrchestrator | Console de teste")
+        self.title("S.C.A.C | Console de teste")
         self.geometry("980x650")
         self.minsize(820, 540)
         self.configure(bg="#eef2f5")
